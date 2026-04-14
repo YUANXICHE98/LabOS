@@ -6,6 +6,166 @@
 const API = "__PORT_8000__";
 
 // ---------------------------------------------------------------------------
+// i18n
+// ---------------------------------------------------------------------------
+const I18N_STORAGE_KEY = "labos.locale";
+const DEFAULT_LOCALE = "zh-CN";
+const SUPPORTED_LOCALES = ["zh-CN", "en"];
+
+let currentLocale = localStorage.getItem(I18N_STORAGE_KEY) || DEFAULT_LOCALE;
+let localeMessages = {};
+let fallbackMessages = {};
+
+function interpolate(template, params = {}) {
+  if (typeof template !== "string") return template;
+  return template.replace(/\{(\w+)\}/g, (_, key) => {
+    return params[key] !== undefined ? String(params[key]) : `{${key}}`;
+  });
+}
+
+async function loadLocaleMessages(locale) {
+  const targetLocale = SUPPORTED_LOCALES.includes(locale) ? locale : DEFAULT_LOCALE;
+
+  const [targetRes, fallbackRes] = await Promise.all([
+    fetch(`./locales/${targetLocale}.json`),
+    fetch(`./locales/${DEFAULT_LOCALE}.json`)
+  ]);
+
+  if (!targetRes.ok) {
+    throw new Error(`Failed to load locale: ${targetLocale}`);
+  }
+  if (!fallbackRes.ok) {
+    throw new Error(`Failed to load fallback locale: ${DEFAULT_LOCALE}`);
+  }
+
+  localeMessages = await targetRes.json();
+  fallbackMessages = await fallbackRes.json();
+  currentLocale = targetLocale;
+  localStorage.setItem(I18N_STORAGE_KEY, currentLocale);
+  document.documentElement.lang = currentLocale;
+}
+
+function t(key, params = {}) {
+  const raw =
+    localeMessages[key] ??
+    fallbackMessages[key] ??
+    key;
+
+  return interpolate(raw, params);
+}
+
+function applyI18n(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((el) => {
+    const key = el.dataset.i18n;
+    if (el.tagName === "OPTION") {
+      el.text = t(key);
+    } else {
+      el.textContent = t(key);
+    }
+  });
+
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    const key = el.dataset.i18nPlaceholder;
+    el.setAttribute("placeholder", t(key));
+  });
+
+  root.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    const key = el.dataset.i18nTitle;
+    el.setAttribute("title", t(key));
+  });
+
+  const langSelect = document.getElementById("language-select");
+  if (langSelect) {
+    langSelect.value = currentLocale;
+  }
+}
+
+function refreshStaticTranslatedUI() {
+  const titles = {
+    dashboard: t("nav.overview"),
+    chat: t("nav.chat"),
+    projects: t("nav.projects"),
+    "project-detail": currentProject ? currentProject.name : t("projects.detailTitle"),
+    settings: t("nav.settings"),
+    terminal: t("nav.terminal")
+  };
+
+  const titleEl = document.getElementById("view-title");
+  if (titleEl) {
+    titleEl.textContent = titles[currentView] || currentView;
+  }
+
+  const badge = document.getElementById("project-badge");
+  if (badge && currentView === "project-detail" && currentProject) {
+    badge.textContent = currentProject.name;
+  }
+
+  if (currentView === "chat" && !currentSessionId) {
+    addChatWelcome();
+  }
+}
+
+async function setLocale(locale) {
+  await loadLocaleMessages(locale);
+  applyI18n(document);
+  refreshStaticTranslatedUI();
+}
+
+async function changeLanguage(locale) {
+  try {
+    await setLocale(locale);
+    applyI18n(document);
+    refreshStaticTranslatedUI();
+
+    if (currentView === "dashboard") loadDashboard();
+    if (currentView === "projects") loadProjectList();
+
+    if (currentView === "project-detail") {
+      loadExperiments();
+      loadPapers();
+      loadMemories();
+      if (currentDetailExp) openExperimentDetail(currentDetailExp);
+    }
+
+    if (currentView === "chat") {
+  const chatMessages = document.getElementById("chat-messages");
+  if (chatMessages) {
+    chatMessages.innerHTML = "";
+  }
+
+  await loadSessions();
+
+  if (currentSessionId) {
+    await loadChatHistory();
+  } else {
+    addChatWelcome();
+  }
+
+  const llmStatus = document.getElementById("llm-status");
+  if (llmStatus) {
+    loadConfig();
+  }
+
+    }
+
+    if (currentView === "settings") {
+      loadConfig();
+      loadLLMProfiles();
+    }
+
+    updateStats();
+  } catch (e) {
+    console.error("changeLanguage:", e);
+  }
+}
+
+window.t = t;
+window.setLocale = setLocale;
+window.changeLanguage = changeLanguage;
+window.applyI18n = applyI18n;
+window.getCurrentLocale = () => currentLocale;
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let currentView = "dashboard";
@@ -22,7 +182,19 @@ let experimentEventSource = null;  // SSE connection for real-time experiment lo
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  try {
+    await loadLocaleMessages(currentLocale);
+    applyI18n(document);  
+    refreshStaticTranslatedUI();
+
+    if (!currentSessionId) {
+      addChatWelcome();
+    }
+  } catch (e) {
+    console.error("Failed to initialize locale:", e);
+  }
+
   checkHealth();
   loadConfig();
   loadPipelineSettings();
@@ -43,7 +215,7 @@ async function checkHealth() {
   } catch (e) {
     void e;
     document.getElementById("status-dot").className = "status-dot error";
-    document.getElementById("status-text").textContent = "离线";
+    document.getElementById("status-text").textContent = t("status.offline");
   }
 }
 
@@ -63,9 +235,15 @@ function switchView(view) {
   const nav = document.querySelector(`.nav-item[data-view="${navView}"]`);
   if (nav) nav.classList.add("active");
 
-  const titles = { dashboard: "概览", chat: "对话", projects: "项目", "project-detail": currentProject ? currentProject.name : "项目详情", settings: "设置", terminal: "终端" };
-  document.getElementById("view-title").textContent = titles[view] || view;
-
+  const titles = {
+  dashboard: t("nav.overview"),
+  chat: t("nav.chat"),
+  projects: t("nav.projects"),
+  "project-detail": currentProject ? currentProject.name : t("projects.detailTitle"),
+  settings: t("nav.settings"),
+  terminal: t("nav.terminal")
+};
+document.getElementById("view-title").textContent = titles[view] || view;
   // Update project badge
   const badge = document.getElementById("project-badge");
   if (view === "project-detail" && currentProject) {
@@ -80,7 +258,14 @@ function switchView(view) {
   if (view === "projects") loadProjectList();
   if (view === "project-detail") { loadExperiments(); loadPapers(); loadMemories(); }
   if (view === "settings") { loadConfig(); loadLLMProfiles(); }
-  if (view === "chat") { if (!currentSessionId) startNewSession(); loadSessions(); }
+  if (view === "chat") {
+    loadSessions();
+    const chatMessages = document.getElementById("chat-messages");
+    if (chatMessages && !currentSessionId) {
+      chatMessages.innerHTML = "";
+      addChatWelcome();
+    }
+  }
   updateStats();
 }
 
@@ -113,24 +298,23 @@ async function loadDashboard() {
     } catch(e) { void e; }
 
     document.getElementById("dash-kpis").innerHTML = `
-      <div class="kpi-card"><div class="kpi-value">${projects.length}</div><div class="kpi-label">项目</div></div>
-      <div class="kpi-card"><div class="kpi-value">${totalExps}</div><div class="kpi-label">实验总数</div></div>
-      <div class="kpi-card kpi-running"><div class="kpi-value">${totalRunning}</div><div class="kpi-label">运行中</div></div>
-      <div class="kpi-card"><div class="kpi-value">${totalMemories}</div><div class="kpi-label">记忆</div></div>
-      <div class="kpi-card"><div class="kpi-value">${totalPapers}</div><div class="kpi-label">论文</div></div>
+      <div class="kpi-card"><div class="kpi-value">${projects.length}</div><div class="kpi-label">${t("nav.projects")}</div></div>
+      <div class="kpi-card"><div class="kpi-value">${totalExps}</div><div class="kpi-label">${t("project.tabs.experiments")}</div></div>
+      <div class="kpi-card kpi-running"><div class="kpi-value">${totalRunning}</div><div class="kpi-label">${t("status.running")}</div></div>
+      <div class="kpi-card"><div class="kpi-value">${totalMemories}</div><div class="kpi-label">${t("project.tabs.memory")}</div></div>
+      <div class="kpi-card"><div class="kpi-value">${totalPapers}</div><div class="kpi-label">${t("project.tabs.papers")}</div></div>
     `;
-
     // Project summary cards
     const projSummary = document.getElementById("dash-project-summary");
     if (projects.length > 0) {
       projSummary.innerHTML = projects.map(p => `
         <div class="recent-exp-row" onclick="openProjectDetail('${p.id}')">
           <span style="font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(p.name)}</span>
-          <span style="font-size:var(--text-xs);color:var(--color-text-faint);">${p.experiment_count || 0} 实验</span>
+          <span style="font-size:var(--text-xs);color:var(--color-text-faint);">${t("projects.experimentCount", { count: p.experiment_count || 0 })}</span>
         </div>
       `).join("");
     } else {
-      projSummary.innerHTML = '<div class="empty-state small">暂无项目。<a href="#" onclick="showNewProjectModal();return false;">创建一个</a></div>';
+      projSummary.innerHTML = `<div class="empty-state small">${t("projects.empty")}<a href="#" onclick="showNewProjectModal();return false;">${t("common.createOne")}</a></div>`;
     }
 
     // Recent experiments across all projects
@@ -155,10 +339,10 @@ async function loadDashboard() {
           </div>
         `).join("");
       } else {
-        document.getElementById("dash-recent-exps").innerHTML = '<div class="empty-state small">暂无实验</div>';
+        document.getElementById("dash-recent-exps").innerHTML = `<div class="empty-state small">${t("experiment.none")}</div>`;
       }
     } else {
-      document.getElementById("dash-recent-exps").innerHTML = '<div class="empty-state small">暂无实验</div>';
+      document.getElementById("dash-recent-exps").innerHTML = `<div class="empty-state small">${t("experiment.none")}</div>`;
     }
   } catch (e) {
     console.error("loadDashboard:", e);
@@ -174,10 +358,10 @@ async function loadProjectList() {
     const projects = await r.json();
     const grid = document.getElementById("project-grid");
     const countEl = document.getElementById("projects-count");
-    if (countEl) countEl.textContent = projects.length > 0 ? `共 ${projects.length} 个项目` : "";
+    if (countEl) countEl.textContent = projects.length > 0 ? t("projects.total", { count: projects.length }) : "";
 
     if (projects.length === 0) {
-      grid.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg><p>暂无项目。创建第一个项目开始研究。</p></div>`;
+      grid.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg><p>${t("projects.empty")}</p></div>`;
       return;
     }
 
@@ -190,7 +374,7 @@ async function loadProjectList() {
         ${p.description ? `<div class="project-card-desc">${esc(p.description.substring(0, 100))}</div>` : ''}
         ${p.repo_url ? `<div class="project-card-repo">${esc(p.repo_url)}</div>` : ''}
         <div class="project-card-stats">
-          <span>🧪 ${p.experiment_count || 0} 实验</span>
+          <span>🧪 ${t("projects.experimentCount", { count: p.experiment_count || 0 })}</span>
         </div>
       </div>
     `).join("");
@@ -237,12 +421,12 @@ function switchProjectTab(tab, btn) {
 }
 
 function showNewProjectModal() {
-  document.getElementById("modal-title").textContent = "新建项目";
+  document.getElementById("modal-title").textContent = t("modal.newProject");
   document.getElementById("modal-body").innerHTML = `
-    <div class="form-group"><label>项目名称</label><input type="text" id="new-proj-name" class="form-input" placeholder="例: MemRL 记忆增强实验"></div>
-    <div class="form-group"><label>GitHub 仓库 (可选)</label><input type="text" id="new-proj-repo" class="form-input" placeholder="https://github.com/MemTensor/MemRL"></div>
-    <div class="form-group"><label>描述 (可选)</label><textarea id="new-proj-desc" class="form-input" rows="3" placeholder="项目目标..."></textarea></div>
-    <div class="form-actions" style="margin-top:var(--space-4);"><button class="btn-primary btn-sm" onclick="createProject()">创建</button><button class="btn-ghost btn-sm" onclick="closeModal()">取消</button></div>
+    <div class="form-group"><label>${t("modal.projectName")}</label><input type="text" id="new-proj-name" class="form-input" placeholder="Example: MemRL Memory Experiment"></div>
+    <div class="form-group"><label>${t("modal.githubRepoOptional")}</label><input type="text" id="new-proj-repo" class="form-input" placeholder="https://github.com/MemTensor/MemRL"></div>
+    <div class="form-group"><label>${t("modal.descriptionOptional")}</label><textarea id="new-proj-desc" class="form-input" rows="3" placeholder="Project goals..."></textarea></div>
+    <div class="form-actions" style="margin-top:var(--space-4);"><button class="btn-primary btn-sm" onclick="createProject()">${t("actions.create")}</button><button class="btn-ghost btn-sm" onclick="closeModal()">${t("actions.cancel")}</button></div>
   `;
   document.getElementById("modal-overlay").classList.add("open");
   setTimeout(() => document.getElementById("new-proj-name")?.focus(), 100);
@@ -292,8 +476,7 @@ async function createProjectFromChat() {
     }
     currentProject = d;
     closeModal();
-    showToast(`项目 "${name}" 已创建，当前对话已关联`);
-    // Remove create-project hints
+    showToast(t("projects.createFromChatSuccess", { name }));
     document.querySelectorAll(".chat-create-project-hint").forEach(el => el.remove());
     loadSessions();
   } catch (e) {
@@ -311,7 +494,7 @@ async function loadSessions() {
     const sessions = await r.json();
     const list = document.getElementById("sessions-list");
     if (sessions.length === 0) {
-      list.innerHTML = '<div class="empty-state small">暂无会话</div>';
+      list.innerHTML = `<div class="empty-state small">${t("chat.noSessions")}</div>`;
       return;
     }
     list.innerHTML = sessions.map(s => `
@@ -362,21 +545,25 @@ function addChatWelcome() {
   const msgs = document.getElementById("chat-messages");
   msgs.innerHTML = `
     <div class="chat-welcome">
-      <div class="welcome-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" stroke-width="1.5"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>
-      <h2>LabOS 对话</h2>
-      <p>输入研究想法或指令。对话后可选择创建项目。</p>
+      <div class="welcome-icon">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" stroke-width="1.5">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+        </svg>
+      </div>
+      <h2>${t("chat.welcomeTitle")}</h2>
+      <p>${t("chat.welcomeSubtitle")}</p>
       <div class="welcome-hints">
-        <button class="hint-chip hint-chip-code" onclick="insertHintWithType('分析这个项目的核心代码架构', 'code')">
-          <span class="chip-icon">💻</span>代码分析
+        <button class="hint-chip hint-chip-code" onclick="insertHintWithType('', 'code')">
+          <span class="chip-icon">💻</span>${t("chat.task.code")}
         </button>
-        <button class="hint-chip hint-chip-paper" onclick="insertHintWithType('调研记忆增强RL领域的最新进展', 'paper')">
-          <span class="chip-icon">📄</span>论文调研
+        <button class="hint-chip hint-chip-paper" onclick="insertHintWithType('', 'paper')">
+          <span class="chip-icon">📄</span>${t("chat.task.paper")}
         </button>
-        <button class="hint-chip hint-chip-experiment" onclick="insertHintWithType('设计下一组消融实验方案', 'experiment')">
-          <span class="chip-icon">🧪</span>实验设计
+        <button class="hint-chip hint-chip-experiment" onclick="insertHintWithType('', 'experiment')">
+          <span class="chip-icon">🧪</span>${t("chat.task.experiment")}
         </button>
-        <button class="hint-chip hint-chip-general" onclick="insertHintWithType('总结最近的研究进展和下一步计划', 'general')">
-          <span class="chip-icon">💬</span>通用对话
+        <button class="hint-chip hint-chip-general" onclick="insertHintWithType('', 'general')">
+          <span class="chip-icon">💬</span>${t("chat.task.general")}
         </button>
       </div>
     </div>
@@ -496,7 +683,7 @@ function appendChatMsg(role, content) {
   const msgs = document.getElementById("chat-messages");
   const div = document.createElement("div");
   div.className = `chat-msg ${role}`;
-  div.innerHTML = `<div class="msg-avatar">${role === "user" ? "你" : "AI"}</div><div class="msg-content">${content ? renderMarkdown(content) : ''}</div>`;
+  div.innerHTML = `<div class="msg-avatar">${role === "user" ? t("chat.user") : t("chat.ai")}</div>`
   msgs.appendChild(div);
   scrollChatBottom();
   return div;
@@ -538,7 +725,7 @@ async function loadExperiments() {
     document.getElementById("compare-btn").style.display = completedCount >= 2 ? "" : "none";
 
     if (filtered.length === 0) {
-      list.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><p>${experimentFilter === 'all' ? '暂无实验。' : '无匹配实验。'}</p></div>`;
+      list.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><p>${experimentFilter === 'all' ? t("experiment.none") : t("experiment.noMatch")}</p></div>`;
       return;
     }
 
@@ -633,13 +820,33 @@ function filterExperiments(filter, btn) {
 }
 
 function showNewExperimentModal() {
-  if (!currentProject) { showToast("请先进入一个项目"); return; }
-  document.getElementById("modal-title").textContent = "新建实验";
+  if (!currentProject) {
+    showToast(t("experiment.needProjectFirst"));
+    return;
+  }
+
+  document.getElementById("modal-title").textContent = t("experiment.newExperiment");
   document.getElementById("modal-body").innerHTML = `
-    <div class="form-group"><label>实验名称</label><input type="text" id="new-exp-name" class="form-input" placeholder="例: 分层记忆结构对比"></div>
-    <div class="form-group"><label>初始假设 (不填则AI生成)</label><textarea id="new-exp-hypothesis" class="form-input" rows="3" placeholder="我们假设..."></textarea></div>
-    <div class="form-group"><label>优先级</label><select id="new-exp-priority" class="form-input"><option value="0">普通</option><option value="1">高</option><option value="2">紧急</option></select></div>
-    <div class="form-actions" style="margin-top:var(--space-4);"><button class="btn-primary btn-sm" onclick="createExperiment()">创建</button><button class="btn-ghost btn-sm" onclick="closeModal()">取消</button></div>
+    <div class="form-group">
+      <label>${t("experiment.name")}</label>
+      <input type="text" id="new-exp-name" class="form-input" placeholder="例: 分层记忆结构对比">
+    </div>
+    <div class="form-group">
+      <label>${t("experiment.initialHypothesis")}</label>
+      <textarea id="new-exp-hypothesis" class="form-input" rows="3" placeholder="我们假设..."></textarea>
+    </div>
+    <div class="form-group">
+      <label>${t("experiment.priority")}</label>
+      <select id="new-exp-priority" class="form-input">
+        <option value="0">普通</option>
+        <option value="1">高</option>
+        <option value="2">紧急</option>
+      </select>
+    </div>
+    <div class="form-actions" style="margin-top:var(--space-4);">
+      <button class="btn-primary btn-sm" onclick="createExperiment()">${t("actions.create")}</button>
+      <button class="btn-ghost btn-sm" onclick="closeModal()">${t("actions.cancel")}</button>
+    </div>
   `;
   document.getElementById("modal-overlay").classList.add("open");
   setTimeout(() => document.getElementById("new-exp-name")?.focus(), 100);
@@ -659,33 +866,34 @@ async function createExperiment() {
 }
 
 async function startExperiment(expId) {
-  // Show execution mode selection modal
-  document.getElementById("modal-title").textContent = "启动实验";
+  document.getElementById("modal-title").textContent = t("experiment.startExperiment");
   document.getElementById("modal-body").innerHTML = `
     <div style="margin-bottom:var(--space-4)">
-      <p style="color:var(--color-text-secondary);font-size:var(--text-sm);margin-bottom:var(--space-4)">请选择本次实验的执行模式：</p>
+      <p style="color:var(--color-text-secondary);font-size:var(--text-sm);margin-bottom:var(--space-4)">
+        ${t("experiment.runningModePrompt")}
+      </p>
       <div class="exec-mode-options">
         <label class="exec-mode-option selected" onclick="selectExecMode(this, 'simulate')">
           <div class="exec-mode-icon">🧠</div>
           <div class="exec-mode-info">
-            <strong>模拟执行</strong>
-            <span>LLM 分析预测，不连接服务器</span>
+            <strong>${t("experiment.mode.simulate")}</strong>
+            <span>${t("experiment.mode.simulateDesc")}</span>
           </div>
           <input type="radio" name="exec-mode" value="simulate" checked style="display:none">
         </label>
         <label class="exec-mode-option" onclick="selectExecMode(this, 'real')">
           <div class="exec-mode-icon">🚀</div>
           <div class="exec-mode-info">
-            <strong>真实执行</strong>
-            <span>通过 SSH 连接 AutoDL 运行训练</span>
+            <strong>${t("experiment.mode.real")}</strong>
+            <span>${t("experiment.mode.realDesc")}</span>
           </div>
           <input type="radio" name="exec-mode" value="real" style="display:none">
         </label>
       </div>
     </div>
     <div style="display:flex;gap:var(--space-2);justify-content:flex-end;margin-top:var(--space-4)">
-      <button class="btn-ghost btn-sm" onclick="closeModal()">取消</button>
-      <button class="btn-primary btn-sm" onclick="confirmStartExperiment('${expId}')">启动</button>
+      <button class="btn-ghost btn-sm" onclick="closeModal()">${t("actions.cancel")}</button>
+      <button class="btn-primary btn-sm" onclick="confirmStartExperiment('${expId}')">${t("actions.start")}</button>
     </div>
   `;
   document.getElementById("modal-overlay").classList.add("open");
@@ -707,7 +915,8 @@ async function confirmStartExperiment(expId) {
       body: JSON.stringify({ execution_mode: selectedExecMode }),
     });
     const d = await r.json();
-    showToast(d.message || "实验已启动");
+    showToast(d.message || t("experiment.started"));
+    showToast(t("experiment.stopped"));
     loadExperiments();
     startExperimentPoll();
     connectExperimentSSE(expId);  // Start real-time log streaming
@@ -723,7 +932,7 @@ async function stopExperiment(expId) {
 }
 
 async function deleteExperiment(expId) {
-  if (!confirm("确定删除这个实验？")) return;
+  if (!confirm(t("experiment.deleteConfirm"))) return;
   try {
     await fetch(`${API}/api/experiments/${expId}`, { method: "DELETE" });
     compareSelected.delete(expId);
@@ -963,16 +1172,13 @@ async function submitFeedback() {
 // Experiment Comparison
 // ---------------------------------------------------------------------------
 function openCompareModal() {
-  if (compareSelected.size < 2) {
-    showToast("请先在实验列表中勾选至少 2 个已完成实验");
-    return;
-  }
+  if (!confirm(t("experiment.deleteConfirm"))) return;
   runComparison();
 }
 
 async function runComparison() {
   document.getElementById("compare-panel").classList.add("open");
-  document.getElementById("compare-content").innerHTML = '<div class="empty-state small">正在生成对比分析...</div>';
+  document.getElementById("compare-content").innerHTML = `<div class="empty-state small">${t("detail.loading")}</div>`;
 
   try {
     const r = await fetch(`${API}/api/experiments/compare`, {
@@ -1018,7 +1224,7 @@ async function loadPapers() {
     const list = document.getElementById("papers-list");
 
     if (papers.length === 0) {
-      list.innerHTML = '<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg><p>搜索相关论文并收录到项目中。</p></div>';
+      list.innerHTML = '<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg><p>${t("papers.empty")}</p>/div>';
       return;
     }
 
@@ -1051,24 +1257,25 @@ async function searchPapersUI() {
   const query = document.getElementById("paper-search-input").value.trim();
   if (!query) return;
   const list = document.getElementById("papers-list");
-  list.innerHTML = '<div class="empty-state small">搜索中...</div>';
+  list.innerHTML = `<div class="empty-state small">${t("papers.searching")}</div>`;
 
   try {
     const r = await fetch(`${API}/api/papers/search`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, project_id: currentProject.id, limit: 15 }),
     });
     const papers = await r.json();
 
     if (papers.length === 0 || papers[0]?.error) {
-      list.innerHTML = `<div class="empty-state small">${papers[0]?.error || '未找到结果'}</div>`;
+      list.innerHTML = `<div class="empty-state small">${papers[0]?.error || t("papers.notFound")}</div>`;
       return;
     }
 
-    showToast(`找到 ${papers.length} 篇论文，已收录到项目`);
+    showToast(t("papers.foundAndSaved", { count: papers.length }));
     loadPapers();
   } catch (e) {
-    list.innerHTML = `<div class="empty-state small">搜索失败: ${esc(e.message)}</div>`;
+    list.innerHTML = `<div class="empty-state small">${t("papers.searchFailed", { message: e.message })}</div>`;
   }
 }
 
@@ -1087,15 +1294,17 @@ async function loadMemories() {
   try {
     const r = await fetch(`${API}/api/memories?project_id=${currentProject.id}`);
     const mems = await r.json();
-    document.getElementById("memory-stats").innerHTML = `共 <span class="stat-value">${mems.length}</span> 条`;
+    document.getElementById("memory-stats").innerHTML = t("memory.total", { count: mems.length });
     renderMemoryList(mems);
-  } catch (e) { void e; }
+  } catch (e) {
+    void e;
+  }
 }
 
 function renderMemoryList(mems) {
   const list = document.getElementById("memory-list");
   if (mems.length === 0) {
-    list.innerHTML = '<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><path d="M12 2a7 7 0 017 7c0 5.25-7 13-7 13S5 14.25 5 9a7 7 0 017-7z"/><circle cx="12" cy="9" r="2.5"/></svg><p>暂无记忆。</p></div>';
+    list.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-faint)" stroke-width="1.5"><path d="M12 2a7 7 0 017 7c0 5.25-7 13-7 13S5 14.25 5 9a7 7 0 017-7z"/><circle cx="12" cy="9" r="2.5"/></svg><p>${t("memory.empty")}</p></div>`;
     return;
   }
   list.innerHTML = mems.map(m => `
@@ -1104,7 +1313,7 @@ function renderMemoryList(mems) {
       <span class="mem-content">${esc(m.content)}</span>
       ${m.similarity !== undefined ? `<span class="mem-sim">${(m.similarity * 100).toFixed(0)}%</span>` : ''}
       <span class="mem-time">${formatTime(m.created_at)}</span>
-      <button class="mem-delete" onclick="deleteMemory(${m.id})" title="删除">
+      <button class="mem-delete" onclick="deleteMemory(${m.id})" title="${t("actions.delete")}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -1114,26 +1323,36 @@ function renderMemoryList(mems) {
 async function searchMemoriesUI() {
   if (!currentProject) return;
   const query = document.getElementById("memory-search-input").value.trim();
-  if (!query) { loadMemories(); return; }
+  if (!query) {
+    loadMemories();
+    return;
+  }
 
   try {
     const r = await fetch(`${API}/api/memories/search`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project_id: currentProject.id, query, top_k: 20 }),
     });
     const results = await r.json();
-    document.getElementById("memory-stats").innerHTML = `搜索结果 <span class="stat-value">${results.length}</span> 条`;
+    document.getElementById("memory-stats").innerHTML = t("memory.searchResults", { count: results.length });
     renderMemoryList(results);
-  } catch (e) { void e; }
+  } catch (e) {
+    void e;
+  }
 }
 
 async function reindexMemories() {
-  showToast("正在重建向量索引...");
+  showToast(t("memory.reindexing"));
   try {
-    const r = await fetch(`${API}/api/memories/reindex?project_id=${currentProject?.id || ''}`, { method: "POST" });
+    const r = await fetch(`${API}/api/memories/reindex?project_id=${currentProject?.id || ''}`, {
+      method: "POST"
+    });
     const d = await r.json();
-    showToast(d.message || "完成");
-  } catch (e) { showToast("重建失败: " + e.message); }
+    showToast(d.message || t("common.success"));
+  } catch (e) {
+    showToast(t("memory.reindexFailed", { message: e.message }));
+  }
 }
 
 async function deleteMemory(id) {
@@ -1168,24 +1387,38 @@ async function addMemory() {
 // ---------------------------------------------------------------------------
 // GitHub Code Analysis
 // ---------------------------------------------------------------------------
+
 async function triggerGitHubAnalysis() {
-  if (!currentProject) { showToast("请先进入一个项目"); return; }
-  if (!currentProject.repo_url) { showToast("项目无 GitHub 仓库 URL"); return; }
+  if (!currentProject) {
+    showToast(t("experiment.needProjectFirst"));
+    return;
+  }
+  if (!currentProject.repo_url) {
+    showToast(t("code.noRepoUrl"));
+    return;
+  }
 
   const resultEl = document.getElementById("code-analysis-result");
-  if (resultEl) resultEl.innerHTML = '<div class="empty-state small">正在分析仓库代码结构...</div>';
+  if (resultEl) {
+    resultEl.innerHTML = `<div class="empty-state small">${t("code.analyzing")}</div>`;
+  }
 
   try {
-    const r = await fetch(`${API}/api/github/analyze?project_id=${currentProject.id}&repo_url=${encodeURIComponent(currentProject.repo_url)}`, { method: "POST" });
+    const r = await fetch(
+      `${API}/api/github/analyze?project_id=${currentProject.id}&repo_url=${encodeURIComponent(currentProject.repo_url)}`,
+      { method: "POST" }
+    );
     const data = await r.json();
 
     if (data.error) {
-      if (resultEl) resultEl.innerHTML = `<div class="empty-state small">${esc(data.error)}</div>`;
+      if (resultEl) {
+        resultEl.innerHTML = `<div class="empty-state small">${esc(data.error)}</div>`;
+      }
       return;
     }
 
     let html = `<div class="code-meta">`;
-    html += `<span class="code-lang">${esc(data.language || '未知')}</span>`;
+    html += `<span class="code-lang">${esc(data.language || t("common.unknown"))}</span>`;
     html += `<span class="code-stars">${data.stars || 0} stars</span>`;
     html += `<span class="code-files">${data.file_count || 0} files</span>`;
     html += `</div>`;
@@ -1195,13 +1428,18 @@ async function triggerGitHubAnalysis() {
     }
 
     if (data.file_tree && data.file_tree.length > 0) {
-      html += `<details class="file-tree-details"><summary>文件结构 (前100)</summary><pre class="file-tree">${esc(data.file_tree.slice(0, 100).join("\n"))}</pre></details>`;
+      html += `<details class="file-tree-details"><summary>${t("code.fileTreeTop100")}</summary><pre class="file-tree">${esc(data.file_tree.slice(0, 100).join("\n"))}</pre></details>`;
     }
 
-    if (resultEl) resultEl.innerHTML = html;
-    showToast("代码分析完成，结果已存入记忆");
+    if (resultEl) {
+      resultEl.innerHTML = html;
+    }
+
+    showToast(t("code.analysisComplete"));
   } catch (e) {
-    if (resultEl) resultEl.innerHTML = `<div class="empty-state small">分析失败: ${esc(e.message)}</div>`;
+    if (resultEl) {
+      resultEl.innerHTML = `<div class="empty-state small">${t("code.analysisFailed", { message: e.message })}</div>`;
+    }
   }
 }
 
@@ -1219,7 +1457,10 @@ async function loadConfig() {
     const setVal = (id, key) => {
       const el = document.getElementById(id); if (!el || !config[key]) return;
       const v = config[key].value || "";
-      if (v.includes("****")) { el.value = ""; el.placeholder = "已设置 (留空不修改)"; }
+      if (v.includes("****")) {
+        el.value = "";
+        el.placeholder = t("settings.maskedPlaceholder");
+      }
       else { el.value = v; }
     };
     setVal("cfg-llm-url", "llm_api_url"); setVal("cfg-llm-key", "llm_api_key"); setVal("cfg-llm-model", "llm_model");
@@ -1444,10 +1685,10 @@ async function updateStats() {
     const r = await fetch(`${API}/api/stats?project_id=${pid}`);
     const s = await r.json();
     document.getElementById("header-stats").innerHTML = `
-      <span class="stat-item">实验 <span class="stat-value">${s.total_experiments}</span></span>
-      <span class="stat-item">运行 <span class="stat-value">${s.running}</span></span>
-      <span class="stat-item">记忆 <span class="stat-value">${s.memories}</span></span>
-      <span class="stat-item">论文 <span class="stat-value">${s.papers || 0}</span></span>
+      <span class="stat-item">${t("project.tabs.experiments")} <span class="stat-value">${s.total_experiments}</span></span>
+      <span class="stat-item">${t("status.running")} <span class="stat-value">${s.running}</span></span>
+      <span class="stat-item">${t("project.tabs.memory")} <span class="stat-value">${s.memories}</span></span>
+      <span class="stat-item">${t("project.tabs.papers")} <span class="stat-value">${s.papers || 0}</span></span>
     `;
   } catch (e) { void e; }
 }
@@ -1484,15 +1725,15 @@ async function executeSSHCommand() {
   const cmd = input.value.trim();
   if (!cmd) return;
   input.value = "";
-  
+
   const output = document.getElementById("ssh-output");
   output.innerHTML += `<div class="ssh-line cmd"><span class="ssh-prompt">$</span> ${esc(cmd)}</div>`;
-  output.innerHTML += `<div class="ssh-line pending">执行中...</div>`;
+  output.innerHTML += `<div class="ssh-line pending">${t("ssh.running")}</div>`;
   output.scrollTop = output.scrollHeight;
-  
-  document.getElementById("ssh-status").textContent = "执行中...";
+
+  document.getElementById("ssh-status").textContent = t("ssh.running");
   document.getElementById("ssh-status").className = "ssh-status running";
-  
+
   try {
     const r = await fetch(`${API}/api/ssh/execute`, {
       method: "POST",
@@ -1504,14 +1745,13 @@ async function executeSSHCommand() {
       }),
     });
     const data = await r.json();
-    
-    // Remove pending line
+
     const pendingEl = output.querySelector(".ssh-line.pending:last-child");
     if (pendingEl) pendingEl.remove();
-    
+
     if (data.error && !data.output) {
       output.innerHTML += `<div class="ssh-line error">${esc(data.error)}</div>`;
-      document.getElementById("ssh-status").textContent = "错误";
+      document.getElementById("ssh-status").textContent = t("ssh.error");
       document.getElementById("ssh-status").className = "ssh-status error";
     } else {
       if (data.output) {
@@ -1522,25 +1762,28 @@ async function executeSSHCommand() {
       if (data.error) {
         output.innerHTML += `<div class="ssh-line error">${esc(data.error)}</div>`;
       }
-      output.innerHTML += `<div class="ssh-line exit-code">退出码: ${data.exit_code ?? 'N/A'}</div>`;
-      document.getElementById("ssh-status").textContent = `完成 (${data.exit_code ?? '?'})`;
-      document.getElementById("ssh-status").className = `ssh-status ${data.exit_code === 0 ? 'ok' : 'error'}`;
+      output.innerHTML += `<div class="ssh-line exit-code">${t("ssh.exitCode", { code: data.exit_code ?? "N/A" })}</div>`;
+      document.getElementById("ssh-status").textContent = t("ssh.completed", { code: data.exit_code ?? "?" });
+      document.getElementById("ssh-status").className = `ssh-status ${data.exit_code === 0 ? "ok" : "error"}`;
     }
   } catch (e) {
     const pendingEl = output.querySelector(".ssh-line.pending:last-child");
     if (pendingEl) pendingEl.remove();
-    output.innerHTML += `<div class="ssh-line error">连接失败: ${esc(e.message)}</div>`;
-    document.getElementById("ssh-status").textContent = "连接失败";
+    output.innerHTML += `<div class="ssh-line error">${t("ssh.connectionFailed")}: ${esc(e.message)}</div>`;
+    document.getElementById("ssh-status").textContent = t("ssh.connectionFailed");
     document.getElementById("ssh-status").className = "ssh-status error";
   }
-  
+
   output.scrollTop = output.scrollHeight;
 }
+  
+    
 
 async function testSSH() {
   const el = document.getElementById("ssh-test-result");
-  el.textContent = "测试中...";
+  el.textContent = t("actions.test") + "...";
   el.className = "test-result";
+
   try {
     const r = await fetch(`${API}/api/ssh/test`, { method: "POST" });
     const d = await r.json();
@@ -1548,29 +1791,29 @@ async function testSSH() {
       el.textContent = d.error;
       el.className = "test-result error";
     } else {
-      el.textContent = `连接成功 (退出码: ${d.exit_code})`;
-      el.className = `test-result ${d.exit_code === 0 ? 'ok' : 'error'}`;
+      el.textContent = t("ssh.testSuccess", { code: d.exit_code });
+      el.className = `test-result ${d.exit_code === 0 ? "ok" : "error"}`;
     }
   } catch (e) {
-    el.textContent = "测试失败";
+    el.textContent = t("ssh.testFailed");
     el.className = "test-result error";
   }
 }
 
 async function executeExperimentSSH(expId) {
-  showToast("正在远程执行实验...");
+  showToast(t("ssh.runRemote"));
   try {
     const r = await fetch(`${API}/api/experiments/${expId}/execute`, { method: "POST" });
     const d = await r.json();
     if (d.ssh_result?.error) {
-      showToast("执行错误: " + d.ssh_result.error);
+      showToast(t("ssh.remoteError", { message: d.ssh_result.error }));
     } else {
-      showToast("远程执行已启动");
+      showToast(t("ssh.remoteStarted"));
       if (currentDetailExp === expId) refreshDetailPanel(expId);
       loadExperiments();
     }
   } catch (e) {
-    showToast("执行失败: " + e.message);
+    showToast(t("ssh.remoteFailed", { message: e.message }));
   }
 }
 
@@ -1578,6 +1821,16 @@ async function executeExperimentSSH(expId) {
 // Utilities
 // ---------------------------------------------------------------------------
 function esc(str) { if (!str) return ""; const div = document.createElement("div"); div.textContent = str; return div.innerHTML; }
+
+function escAttr(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/'/g, "&#39;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 function renderMarkdown(text) {
   if (!text) return "";
@@ -1608,13 +1861,26 @@ function renderMarkdown(text) {
 }
 
 function statusLabel(status) {
-  const labels = { queued: "排队", running: "运行中", completed: "完成", failed: "失败", stopped: "已停止", idle: "空闲", pending_approval: "待审批", rejected: "已拒绝" };
+  const labels = {
+    queued: t("status.queued"),
+    running: t("status.running"),
+    completed: t("status.completed"),
+    failed: t("status.failed"),
+    stopped: t("status.stopped"),
+    idle: t("status.idle"),
+    pending_approval: t("status.pendingApproval"),
+    rejected: t("status.rejected")
+  };
   return labels[status] || status;
 }
 
 function formatTime(ts) {
   if (!ts) return "";
-  try { const d = new Date(ts); return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+  try { const d = new Date(ts); return d.toLocaleTimeString(currentLocale, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit"
+}); }
   catch (e) { void e; return ts; }
 }
 
